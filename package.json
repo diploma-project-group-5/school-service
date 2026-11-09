@@ -1,0 +1,43 @@
+{
+  "name": "@lad/school-service",
+  "version": "0.1.0",
+  "private": true,
+  "description": "«Лад»: дані закладу (профіль, дзвінки, класи, предмети, вчителі, план), журнал дій і знімок для розкладу",
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "dev": "tsx watch --env-file=.env src/server.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/server.js",
+    "migrate": "node dist/migrate.js",
+    "migrate:dev": "tsx --env-file=.env src/migrate.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run --coverage",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@fastify/type-provider-typebox": "6.3.0",
+    "@platformatic/kafka": "2.15.0",
+    "fastify": "5.12.8",
+    "jose": "6.2.15",
+    "kysely": "0.29.8",
+    "pg": "8.23.1",
+    "typebox": "1.4.4"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@testcontainers/postgresql": "12.2.1",
+    "@types/node": "24.19.2",
+    "@types/pg": "8.23.1",
+    "@vitest/coverage-v8": "4.1.12",
+    "eslint": "10.14.0",
+    "testcontainers": "12.2.1",
+    "tsx": "4.23.15",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.72.1",
+    "vitest": "4.1.12"
+  }
+}
