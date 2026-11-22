@@ -57,4 +57,4 @@ process.on('SIGTERM', () => void shutdown('SIGTERM'));
 process.on('SIGINT', () => void shutdown('SIGINT'));
 
 await app.listen({ host: config.host, port: config.port });
-await internal.listen({ host: config.host, port: config.internalPort });
+await internal.listen({ host: config.internalHost, port: config.internalPort });

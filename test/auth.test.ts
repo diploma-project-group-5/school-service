@@ -41,6 +41,29 @@ describe('доступ до /api/v1/school', () => {
     for (const t of tokens) expect((await getClasses(t)).statusCode).toBe(401);
   });
 
+  test('без токена з некоректним тілом → 401, а не 400 зі схемою (Z4-7)', async () => {
+    const put = await ctx.app.inject({ method: 'PUT', url: '/api/v1/school/school', payload: { bogus: 1 } });
+    expect(put.statusCode).toBe(401);
+    expect(put.body).not.toContain('bogus');
+    expect((await ctx.app.inject({ method: 'POST', url: '/api/v1/school/classes', payload: {} })).statusCode).toBe(401);
+  });
+
+  test('X-Request-Id: короткий безпечний — у correlation_id події, довгий чи дивний — замінено uuid (Z3-9)', async () => {
+    const put = async (requestId: string) => {
+      const school = newSchool();
+      const res = await ctx.app.inject({
+        method: 'PUT',
+        url: '/api/v1/school/school',
+        headers: { authorization: `Bearer ${await ctx.tokens.scheduler(school)}`, 'x-request-id': requestId },
+        payload: { lessons_per_day: 6 },
+      });
+      expect(res.statusCode).toBe(200);
+      return (await ctx.events(school))[0]!.correlation_id;
+    };
+    expect(await put('req-5f2c9a')).toBe('req-5f2c9a');
+    for (const bad of ['x'.repeat(200), 'a b', 'кирилиця']) expect(await put(bad)).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
   test('sysadmin → 403', async () => {
     const res = await getClasses(await ctx.tokens.sysadmin());
     expect(res.statusCode).toBe(403);

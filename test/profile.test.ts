@@ -57,11 +57,17 @@ describe('профіль', () => {
     expect(await ctx.events(school)).toHaveLength(1);
   });
 
-  test('скидання поля в null дозволене', async () => {
+  test('заповнене поле формули місткості не очищується → 400; null для ще порожнього поля — без змін (Z5-2)', async () => {
     const school = newSchool();
-    await ctx.as(school, 'PUT', '/school', { shelter_seats: 50 });
-    const res = await ctx.as(school, 'PUT', '/school', { shelter_seats: null });
-    expect(res.json()).toMatchObject({ shelter_seats: null, snapshot_version: 2 });
+    await ctx.as(school, 'PUT', '/school', { shelter_capacity: 120, lessons_per_day: 6 });
+    for (const field of ['shelter_capacity', 'lessons_per_day']) {
+      const res = await ctx.as(school, 'PUT', '/school', { [field]: null });
+      expect(res.statusCode, field).toBe(400);
+      expect(res.json()).toMatchObject({ code: 'validation_failed' });
+    }
+    const empty = await ctx.as(school, 'PUT', '/school', { shelter_seats: null, non_teaching_staff: null });
+    expect(empty.json()).toMatchObject({ shelter_capacity: 120, shelter_seats: null, snapshot_version: 1 });
+    expect(await ctx.events(school)).toHaveLength(1);
   });
 
   test('валідація: уроків на день 1–10, невідомі поля, від’ємні значення', async () => {
