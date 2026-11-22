@@ -111,6 +111,9 @@ describe.skipIf(!enabled)('Kafka', { timeout: 90_000 }, () => {
 
     ctx = await testApp();
     relay = relayDb();
+    // Ненадіслані рядки інших файлів тестів (зокрема з топіками, яких у брокері немає) — не для цього
+    // файлу: relay бачить outbox усіх закладів, тож відправляємо лише події, записані тут (issue #2).
+    await relay.updateTable('outbox').set({ published_at: new Date() }).where('published_at', 'is', null).execute();
     producer = createProducer({ brokers, clientId: 'school-service-test' });
     source = createSource({ brokers, clientId: 'school-service-test', groupId: `school-service-test-${crypto.randomUUID()}`, topics: ['school.registered', 'audit.recorded'] });
     consuming = runConsumer(source, { db: ctx.db, producer, handlers, log, backoffMs: () => 10 });

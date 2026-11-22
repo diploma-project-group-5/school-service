@@ -371,6 +371,8 @@ describe('щоденна чистка (school_maint)', () => {
     expect(left.map((l) => l.action)).toEqual(['fresh']);
     const outbox = await owner.selectFrom('outbox').select('published_at').where('school_id', '=', school).execute();
     expect(outbox).toEqual([{ published_at: null }]);
+    // Ненадісланий рядок з неіснуючим топіком інакше дістався б relay у kafka.test і завис би на відправці.
+    await owner.deleteFrom('outbox').where('school_id', '=', school).execute();
   });
 
   test('scheduleCleanup повертає функцію зупинки', () => {
