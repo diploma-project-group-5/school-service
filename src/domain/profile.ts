@@ -21,6 +21,7 @@ export const EDITABLE_PROFILE_FIELDS = [
   'shelter_seats',
 ] as const;
 type EditableField = (typeof EDITABLE_PROFILE_FIELDS)[number];
+const CAPACITY_FIELDS = ['lessons_per_day', 'shelter_capacity', 'non_teaching_staff', 'shelter_seats'] as const;
 export type ProfilePatch = Partial<Pick<SchoolProfile, EditableField>>;
 
 export const EMPTY_PROFILE: SchoolProfile = {
@@ -53,6 +54,10 @@ export const getProfile = (db: Db, schoolId: string) => withSchool(db, schoolId,
 export async function updateProfile(db: Db, ctx: Ctx, patch: ProfilePatch): Promise<SchoolProfile> {
   return withSchool(db, ctx.schoolId, async (trx) => {
     const current = await readProfile(trx, ctx.schoolId);
+    // null дозволено лише для ще не заповненого поля (порожній профіль нового закладу). Заповнене поле
+    // формули місткості не очищується: інакше ліміт стає невизначеним, а timetable — без причини stale (Z5-2).
+    const cleared = CAPACITY_FIELDS.filter((f) => patch[f] === null && current[f] !== null);
+    if (cleared.length > 0) fail(400, 'validation_failed', 'Поле не можна очистити', `Вкажіть значення: ${cleared.join(', ')}`);
     const changed = EDITABLE_PROFILE_FIELDS.filter((f) => patch[f] !== undefined && patch[f] !== current[f]);
     if (changed.length === 0) return current;
     const version = await bumpSnapshotVersion(trx, ctx.schoolId);

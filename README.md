@@ -6,11 +6,11 @@ Node 24 · TypeScript 6.0 · Fastify 5 · Kysely + PostgreSQL 16 · @platformati
 
 ## API
 
-Усі маршрути `/api/v1/school/*` — лише з токеном клієнта `web`, роллю `scheduler` і непорожнім `school_id`. Заклад береться з токена, у шляхах його немає. Без токена або з недійсним — 401, токен `sysadmin` чи без `school_id` — 403, чужий або неіснуючий ресурс — 404. Помилки — `application/problem+json` з полем `code`.
+Усі маршрути `/api/v1/school/*` — лише з токеном клієнта `web`, роллю `scheduler` і непорожнім `school_id`. Заклад береться з токена, у шляхах його немає. Без токена або з недійсним — 401, токен `sysadmin` чи без `school_id` — 403, чужий або неіснуючий ресурс — 404. Токен перевіряється до розбору тіла (хук `onRequest`): анонім не отримує 400 зі схемою маршруту. Помилки — `application/problem+json` з полем `code`. `X-Request-Id` (1–128 символів `[A-Za-z0-9._:-]`) стає `correlation_id` подій; інший — замінюється новим uuid.
 
 | Маршрут | Що робить |
 |---|---|
-| `GET` `PUT /school` | профіль: `lessons_per_day` (1–10), `saturday`, `shelter_capacity` (паспортна місткість), `non_teaching_staff`, `shelter_seats` (облаштовані місця); PUT частковий, `name` і `snapshot_version` лише для читання. До приходу `school.registered` GET повертає 200 з порожнім профілем |
+| `GET` `PUT /school` | профіль: `lessons_per_day` (1–10), `saturday`, `shelter_capacity` (паспортна місткість), `non_teaching_staff`, `shelter_seats` (облаштовані місця); PUT частковий, `name` і `snapshot_version` лише для читання; заповнене поле формули місткості (`lessons_per_day`, `shelter_capacity`, `non_teaching_staff`, `shelter_seats`) не можна очистити в `null` — 400. До приходу `school.registered` GET повертає 200 з порожнім профілем |
 | `GET` `PUT /bells` | основний розклад дзвінків `[{ lesson_no, start: "HH:MM", end }]`; PUT замінює цілком; уроки не перетинаються |
 | `GET` `POST /classes`, `PUT` `DELETE /classes/{id}` | класи: `name`, `students` (0–60), `in_person_priority`; DELETE — архівування (`archived_at`), рядки плану класу видаляються; назва активного класу унікальна (409 `name_taken`) |
 | `GET` `POST /subjects`, `PUT` `DELETE /subjects/{id}` | предмети: `name`, `short_name`, `education_area` (9 галузей), `not_in_shelter`; DELETE — архівування, 409 `in_curriculum`, якщо предмет у плані |
@@ -21,7 +21,7 @@ Node 24 · TypeScript 6.0 · Fastify 5 · Kysely + PostgreSQL 16 · @platformati
 | `GET /audit?from=&to=&target=` | журнал за період (дати включно, Europe/Kyiv) і, за потреби, над одним ідентифікатором; від нових до старих |
 | `GET /health` | 200 `{ "status": "ok" }` або 503; через шлюз не відкривається |
 
-Внутрішній маршрут — на **окремому порту** (`INTERNAL_PORT`, 3102), на який шлюз не веде; на публічному порту `/api/v1/school/internal/*` дає 404:
+Внутрішній маршрут — на **окремому порту** (`INTERNAL_PORT`, 3102; адреса `INTERNAL_HOST`, типово `127.0.0.1`, в образі Docker `0.0.0.0` для мережі compose), на який шлюз не веде; на публічному порту `/api/v1/school/internal/*` дає 404:
 
 | Маршрут | Що робить |
 |---|---|
@@ -45,7 +45,7 @@ Node 24 · TypeScript 6.0 · Fastify 5 · Kysely + PostgreSQL 16 · @platformati
 | `school.registered` | слухає | профіль з назвою (`snapshot_version` не змінюється) і запис журналу «заклад зареєстровано» |
 | `audit.recorded` | слухає | запис журналу про дію в timetable: `{ at, actor, action, target, details }` |
 
-Конверт — `contracts/schemas/events/envelope.v1.json`, ключ партиції — `school_id`. Relay відправляє outbox у Kafka (ідемпотентний продюсер, acks=all). Консюмер обробляє по одному повідомленню, пише `event_id` в inbox і пропускає повтори; технічна помилка — 3 спроби з паузою, далі `<топік>.dlq`; зламана подія (не JSON, не той конверт, невідомий MAJOR `schema_version`) — одразу в DLQ. Offset підтверджується після обробки або запису в DLQ.
+Конверт — `contracts/schemas/events/envelope.v1.json`, ключ партиції — `school_id`. Relay відправляє outbox у Kafka (ідемпотентний продюсер, acks=all) частинами до 900 КБ; подія, більша за ліміт брокера, лишається в outbox і логується, а не блокує наступні. Консюмер обробляє по одному повідомленню, пише `event_id` в inbox і пропускає повтори; технічна помилка — 4 спроби з паузами 1, 5 і 15 с (переживає рестарт PostgreSQL), далі `<топік>.dlq`; зламана подія (не JSON, не той конверт, невідомий MAJOR `schema_version`) — одразу в DLQ. Offset підтверджується після обробки або запису в DLQ. Потік консюмера під наглядом: якщо Kafka недоступна, він перезапускається з паузою 1 → 30 с, а HTTP-API працює далі.
 
 ## База даних
 
@@ -89,7 +89,7 @@ Vitest сам піднімає PostgreSQL 16.15 і Kafka 4.3.2 у контейн
 | `test/profile.test.ts` | порожній профіль, часткове оновлення, `snapshot_version`, подія й журнал, дзвінки та їх валідація |
 | `test/data.test.ts` | класи, предмети, вчителі (`teacher_no` при паралельних запитах, видалення й експорт), план, ізоляція закладів |
 | `test/audit-snapshot.test.ts` | журнал (період за Києвом, фільтр, незмінність), внутрішній знімок |
-| `test/events.test.ts` | `school.registered`, `audit.recorded`, inbox, конверт, консюмер (3 спроби → DLQ), relay, щоденна чистка |
+| `test/events.test.ts` | `school.registered`, `audit.recorded`, inbox, конверт, консюмер (4 спроби → DLQ, перезапуск потоку), relay (частини до 900 КБ), щоденна чистка |
 | `test/db.test.ts` | RLS у кожній таблиці, права app/relay/maint, відсутність BYPASSRLS, FORCE і `school_id` у ключі, міграції up/down |
 | `test/kafka.test.ts` | справжня Kafka: relay → топік, консюмер → профіль, зламана подія → DLQ |
 | `test/units.test.ts` | конфігурація, перевірка дзвінків |

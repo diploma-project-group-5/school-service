@@ -3,6 +3,12 @@
 
 export interface Config {
   host: string;
+  /**
+   * Адреса внутрішнього порту. За замовчуванням 127.0.0.1: на машині розробника знімок закладу з
+   * підписами вчителів не відкривається в локальну мережу (Z4-4). Образ Docker задає 0.0.0.0 —
+   * у compose знімок бере timetable-service з мережі compose, портів назовні немає.
+   */
+  internalHost: string;
   /** Публічний порт: шлюз веде сюди /api/v1/school/*. */
   port: number;
   /** Окремий порт для /internal/v1/*: шлюз на нього не веде (розділ 07). */
@@ -42,6 +48,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   const config: Config = {
     host: env.HOST ?? '0.0.0.0',
+    internalHost: env.INTERNAL_HOST ?? '127.0.0.1',
     port: int('PORT', 3002),
     internalPort: int('INTERNAL_PORT', 3102),
     logLevel: env.LOG_LEVEL ?? 'info',

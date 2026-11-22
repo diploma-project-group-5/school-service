@@ -53,7 +53,10 @@ async function startKafka(): Promise<{ brokers: string[]; container: StartedTest
   return { brokers: [`localhost:${port}`], container };
 }
 
-async function waitFor<T>(fn: () => Promise<T | undefined>, timeoutMs = 30_000): Promise<T> {
+/** Скільки чекати повідомлення в топіку: брокер у контейнері на завантаженій машині повільний (issue #2). */
+const KAFKA_WAIT_MS = 60_000;
+
+async function waitFor<T>(fn: () => Promise<T | undefined>, timeoutMs = KAFKA_WAIT_MS): Promise<T> {
   const until = Date.now() + timeoutMs;
   for (;;) {
     const v = await fn();
@@ -73,7 +76,7 @@ async function readUntil(brokers: string[], topic: string, predicate: (value: st
   });
   const stream = await consumer.consume({ topics: [topic], mode: 'earliest', autocommit: false });
   try {
-    const timer = setTimeout(() => void stream.close(), 30_000);
+    const timer = setTimeout(() => void stream.close(), KAFKA_WAIT_MS);
     for await (const m of stream) {
       if (predicate(m.value ?? '', m.headers)) {
         clearTimeout(timer);
@@ -87,7 +90,8 @@ async function readUntil(brokers: string[], topic: string, predicate: (value: st
   }
 }
 
-describe.skipIf(!enabled)('Kafka', () => {
+// Тест чекає топік до KAFKA_WAIT_MS — його власний тайм-аут більший за загальні 30 с.
+describe.skipIf(!enabled)('Kafka', { timeout: 90_000 }, () => {
   let container: StartedTestContainer | undefined;
   let brokers: string[];
   let ctx: TestCtx;
@@ -107,6 +111,9 @@ describe.skipIf(!enabled)('Kafka', () => {
 
     ctx = await testApp();
     relay = relayDb();
+    // Ненадіслані рядки інших файлів тестів (зокрема з топіками, яких у брокері немає) — не для цього
+    // файлу: relay бачить outbox усіх закладів, тож відправляємо лише події, записані тут (issue #2).
+    await relay.updateTable('outbox').set({ published_at: new Date() }).where('published_at', 'is', null).execute();
     producer = createProducer({ brokers, clientId: 'school-service-test' });
     source = createSource({ brokers, clientId: 'school-service-test', groupId: `school-service-test-${crypto.randomUUID()}`, topics: ['school.registered', 'audit.recorded'] });
     consuming = runConsumer(source, { db: ctx.db, producer, handlers, log, backoffMs: () => 10 });

@@ -16,6 +16,7 @@ describe('конфігурація', () => {
   test('значення за замовчуванням', () => {
     expect(loadConfig(base)).toMatchObject({
       host: '0.0.0.0',
+      internalHost: '127.0.0.1',
       port: 3002,
       internalPort: 3102,
       oidcClientId: 'web',
@@ -24,6 +25,11 @@ describe('конфігурація', () => {
       kafkaGroupId: 'school-service',
       relayIntervalMs: 500,
     });
+  });
+
+  test('внутрішній порт поза контейнером — лише 127.0.0.1, INTERNAL_HOST перевизначає (Z4-4)', () => {
+    expect(loadConfig({ ...base, HOST: '0.0.0.0' }).internalHost).toBe('127.0.0.1');
+    expect(loadConfig({ ...base, INTERNAL_HOST: '0.0.0.0' }).internalHost).toBe('0.0.0.0');
   });
 
   test('список брокерів через кому', () => {
