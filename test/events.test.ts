@@ -1,12 +1,12 @@
 // Вхідні події (inbox, повтори), консюмер (3 спроби → DLQ), relay outbox → Kafka, щоденна чистка.
 // Kafka тут — шина в пам'яті; справжній брокер перевіряє kafka.test.ts.
-import { afterAll, beforeAll, describe, expect, test } from 'vitest';
+import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest';
 import type { Db } from '../src/db/index.js';
 import { InvalidEventError, parseEnvelope, type Envelope } from '../src/db/events.js';
 import { handleAuditRecorded, handlers, handleSchoolRegistered } from '../src/domain/events.js';
 import type { IncomingMessage, OutgoingMessage, Producer } from '../src/kafka/bus.js';
 import { processMessage, runConsumer } from '../src/kafka/consumer.js';
-import { relayOnce, startRelay } from '../src/kafka/relay.js';
+import { chunkBySize, MAX_SEND_BYTES, messageBytes, relayOnce, startRelay } from '../src/kafka/relay.js';
 import { cleanup, scheduleCleanup } from '../src/maint.js';
 import { maintDb, newSchool, superDb, relayDb, testApp, type TestCtx } from './helpers.js';
 import Fastify from 'fastify';
@@ -39,14 +39,20 @@ const envelope = (type: string, schoolId: string, data: Record<string, unknown>)
   data,
 });
 
+/** Kafka в пам'яті: failNext — наступна відправка падає; failOn — падає n-та відправка; понад 1 МБ — MESSAGE_TOO_LARGE. */
 class MemoryProducer implements Producer {
   sent: OutgoingMessage[] = [];
+  readonly calls: OutgoingMessage[][] = [];
   failNext = 0;
+  failOn = 0;
   async send(messages: OutgoingMessage[]) {
-    if (this.failNext > 0) {
-      this.failNext--;
+    this.calls.push(messages);
+    if (this.failNext > 0 || this.calls.length === this.failOn) {
+      if (this.failNext > 0) this.failNext--;
       throw new Error('kafka недоступна');
     }
+    // Як брокер з message.max.bytes ≈ 1 МБ: завеликий запит не приймається.
+    if (messages.reduce((n, m) => n + messageBytes(m), 0) > 1_048_576) throw new Error('MESSAGE_TOO_LARGE');
     this.sent.push(...messages);
   }
   async close() {}
@@ -211,6 +217,66 @@ describe('консюмер', () => {
 });
 
 describe('relay', () => {
+  /** Подія з корисним навантаженням ~bytes байтів прямо в outbox (як великі версії розкладу). */
+  async function bigEvent(schoolId: string, bytes: number) {
+    const eventId = crypto.randomUUID();
+    await owner
+      .insertInto('outbox')
+      .values({ school_id: schoolId, event_id: eventId, topic: 'audit.recorded', payload: JSON.stringify({ event_id: eventId, pad: 'x'.repeat(bytes) }) })
+      .execute();
+    return eventId;
+  }
+  const isPublished = async (eventId: string) =>
+    (await owner.selectFrom('outbox').select('published_at').where('event_id', '=', eventId).executeTakeFirstOrThrow()).published_at !== null;
+
+  test('пачка великих подій іде частинами до MAX_SEND_BYTES, а не одним запитом понад 1 МБ', async () => {
+    while ((await relayOnce(relay, new MemoryProducer())) > 0);
+    const school = crypto.randomUUID();
+    const ids: string[] = [];
+    for (let i = 0; i < 10; i++) ids.push(await bigEvent(school, 250_000));
+    const producer = new MemoryProducer();
+    expect(await relayOnce(relay, producer)).toBe(10);
+    expect(producer.calls.length).toBeGreaterThanOrEqual(3);
+    for (const call of producer.calls) expect(call.reduce((n, m) => n + messageBytes(m), 0)).toBeLessThanOrEqual(MAX_SEND_BYTES);
+    for (const id of ids) expect(await isPublished(id)).toBe(true);
+  });
+
+  test('подія понад ліміт не блокує наступні: лишається ненадісланою, решта йде, onOversize викликано', async () => {
+    while ((await relayOnce(relay, new MemoryProducer())) > 0);
+    const school = crypto.randomUUID();
+    const huge = await bigEvent(school, 2_000_000);
+    const small = await bigEvent(school, 100);
+    const producer = new MemoryProducer();
+    const onOversize = vi.fn();
+    expect(await relayOnce(relay, producer, { onOversize })).toBe(1);
+    expect(await isPublished(small)).toBe(true);
+    expect(await isPublished(huge)).toBe(false);
+    expect(onOversize).toHaveBeenCalledWith(expect.objectContaining({ event_id: huge, school_id: school }));
+    // Прибираємо, щоб завелика подія не заважала іншим тестам файлу.
+    await owner.deleteFrom('outbox').where('event_id', '=', huge).execute();
+  });
+
+  test('впала не перша частина — надіслані частини зафіксовано, решта йде наступним проходом', async () => {
+    while ((await relayOnce(relay, new MemoryProducer())) > 0);
+    const school = crypto.randomUUID();
+    const ids: string[] = [];
+    for (let i = 0; i < 6; i++) ids.push(await bigEvent(school, 250_000));
+    const producer = new MemoryProducer();
+    producer.failOn = 2;
+    const first = await relayOnce(relay, producer);
+    expect(first).toBeGreaterThan(0);
+    expect(first).toBeLessThan(6);
+    expect(await relayOnce(relay, producer)).toBe(6 - first);
+    for (const id of ids) expect(await isPublished(id)).toBe(true);
+    expect(producer.sent).toHaveLength(6);
+    expect(new Set(producer.sent.map((m) => JSON.parse(m.value).event_id))).toEqual(new Set(ids));
+  });
+
+  test('chunkBySize: порядок збережено, межа не перевищується, завеликий елемент — окремою частиною', () => {
+    expect(chunkBySize([3, 3, 3, 9, 1], (n) => n, 6)).toEqual([[3, 3], [3], [9], [1]]);
+    expect(chunkBySize([], (n: number) => n, 6)).toEqual([]);
+  });
+
   test('відправляє невідправлені події з ключем school_id і позначає їх', async () => {
     // Спершу відправляємо все, що накопичили інші тести, щоб далі рахувати лише свої події.
     while ((await relayOnce(relay, new MemoryProducer())) > 0);
