@@ -4,8 +4,8 @@ import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest';
 import type { Db } from '../src/db/index.js';
 import { InvalidEventError, parseEnvelope, type Envelope } from '../src/db/events.js';
 import { handleAuditRecorded, handlers, handleSchoolRegistered } from '../src/domain/events.js';
-import type { IncomingMessage, OutgoingMessage, Producer } from '../src/kafka/bus.js';
-import { processMessage, runConsumer } from '../src/kafka/consumer.js';
+import type { IncomingMessage, MessageSource, OutgoingMessage, Producer } from '../src/kafka/bus.js';
+import { processMessage, RETRY_DELAYS_MS, runConsumer, superviseConsumer } from '../src/kafka/consumer.js';
 import { chunkBySize, MAX_SEND_BYTES, messageBytes, relayOnce, startRelay } from '../src/kafka/relay.js';
 import { cleanup, scheduleCleanup } from '../src/maint.js';
 import { maintDb, newSchool, superDb, relayDb, testApp, type TestCtx } from './helpers.js';
@@ -155,7 +155,7 @@ describe('консюмер', () => {
     expect(producer.sent).toEqual([]);
   });
 
-  test('технічна помилка: 3 спроби з паузою, далі DLQ з заголовками і commit', async () => {
+  test('технічна помилка: 4 спроби з паузою, далі DLQ з заголовками і commit', async () => {
     const producer = new MemoryProducer();
     let calls = 0;
     const failing = async () => {
@@ -166,7 +166,7 @@ describe('консюмер', () => {
     const m = message('audit.recorded', raw);
     const res = await processMessage(m, { db: ctx.db, producer, handlers: { 'audit.recorded': failing }, log, backoffMs: () => 1 });
     expect(res).toBe('dlq');
-    expect(calls).toBe(3);
+    expect(calls).toBe(4);
     expect(m.committed).toBe(1);
     expect(producer.sent).toEqual([
       {
@@ -199,6 +199,40 @@ describe('консюмер', () => {
     expect(await processMessage(unknown, { db: ctx.db, producer, handlers, log })).toBe('dlq');
     expect(producer.sent.map((s) => s.topic)).toEqual(['school.registered.dlq', 'school.registered.dlq', 'mystery.dlq']);
     expect([bad, noName, unknown].map((m) => m.committed)).toEqual([1, 1, 1]);
+  });
+
+  test('superviseConsumer: упалий потік (Kafka недоступна) перезапускається з паузою, процес живе (Z6-2)', async () => {
+    const producer = new MemoryProducer();
+    let made = 0;
+    let closed = 0;
+    const seen: string[] = [];
+    const source = (): MessageSource => {
+      const n = ++made;
+      let release: () => void = () => undefined;
+      const closedSignal = new Promise<void>((r) => (release = r));
+      return {
+        run: async (on) => {
+          if (n <= 2) throw new Error('joinGroup failed');
+          await on({ ...message('t', JSON.stringify(envelope('audit.recorded', newSchool(), {}))), commit: async () => { seen.push('commit'); } });
+          await closedSignal; // далі потік чекає нових повідомлень, поки його не закриють
+        },
+        close: async () => {
+          closed++;
+          release();
+        },
+      };
+    };
+    const handle = superviseConsumer(source, { db: ctx.db, producer, handlers: { t: async () => { seen.push('handled'); } }, log: log }, { minDelayMs: 1, maxDelayMs: 5 });
+    for (let i = 0; i < 100 && seen.length < 2; i++) await new Promise((r) => setTimeout(r, 10));
+    expect(made).toBe(3);
+    expect(closed).toBe(2);
+    expect(seen).toEqual(['handled', 'commit']);
+    await handle.stop();
+    expect(closed).toBe(3);
+  });
+
+  test('технічна помилка: 4 спроби з паузами 1, 5, 15 с за замовчуванням (Z6-3)', () => {
+    expect(RETRY_DELAYS_MS).toEqual([1_000, 5_000, 15_000]);
   });
 
   test('runConsumer проганяє всі повідомлення джерела по черзі', async () => {

@@ -45,7 +45,7 @@ Node 24 · TypeScript 6.0 · Fastify 5 · Kysely + PostgreSQL 16 · @platformati
 | `school.registered` | слухає | профіль з назвою (`snapshot_version` не змінюється) і запис журналу «заклад зареєстровано» |
 | `audit.recorded` | слухає | запис журналу про дію в timetable: `{ at, actor, action, target, details }` |
 
-Конверт — `contracts/schemas/events/envelope.v1.json`, ключ партиції — `school_id`. Relay відправляє outbox у Kafka (ідемпотентний продюсер, acks=all). Консюмер обробляє по одному повідомленню, пише `event_id` в inbox і пропускає повтори; технічна помилка — 3 спроби з паузою, далі `<топік>.dlq`; зламана подія (не JSON, не той конверт, невідомий MAJOR `schema_version`) — одразу в DLQ. Offset підтверджується після обробки або запису в DLQ.
+Конверт — `contracts/schemas/events/envelope.v1.json`, ключ партиції — `school_id`. Relay відправляє outbox у Kafka (ідемпотентний продюсер, acks=all) частинами до 900 КБ; подія, більша за ліміт брокера, лишається в outbox і логується, а не блокує наступні. Консюмер обробляє по одному повідомленню, пише `event_id` в inbox і пропускає повтори; технічна помилка — 4 спроби з паузами 1, 5 і 15 с (переживає рестарт PostgreSQL), далі `<топік>.dlq`; зламана подія (не JSON, не той конверт, невідомий MAJOR `schema_version`) — одразу в DLQ. Offset підтверджується після обробки або запису в DLQ. Потік консюмера під наглядом: якщо Kafka недоступна, він перезапускається з паузою 1 → 30 с, а HTTP-API працює далі.
 
 ## База даних
 
@@ -89,7 +89,7 @@ Vitest сам піднімає PostgreSQL 16.15 і Kafka 4.3.2 у контейн
 | `test/profile.test.ts` | порожній профіль, часткове оновлення, `snapshot_version`, подія й журнал, дзвінки та їх валідація |
 | `test/data.test.ts` | класи, предмети, вчителі (`teacher_no` при паралельних запитах, видалення й експорт), план, ізоляція закладів |
 | `test/audit-snapshot.test.ts` | журнал (період за Києвом, фільтр, незмінність), внутрішній знімок |
-| `test/events.test.ts` | `school.registered`, `audit.recorded`, inbox, конверт, консюмер (3 спроби → DLQ), relay, щоденна чистка |
+| `test/events.test.ts` | `school.registered`, `audit.recorded`, inbox, конверт, консюмер (4 спроби → DLQ, перезапуск потоку), relay (частини до 900 КБ), щоденна чистка |
 | `test/db.test.ts` | RLS у кожній таблиці, права app/relay/maint, відсутність BYPASSRLS, FORCE і `school_id` у ключі, міграції up/down |
 | `test/kafka.test.ts` | справжня Kafka: relay → топік, консюмер → профіль, зламана подія → DLQ |
 | `test/units.test.ts` | конфігурація, перевірка дзвінків |
