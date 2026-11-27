@@ -131,7 +131,7 @@ describe('міграції', () => {
       expect(await migrateToLatest(owner)).toEqual(['0001_school_data']);
     } finally {
       await owner.destroy();
-      await admin.query(`DROP DATABASE ${db} WITH (FORCE)`);
+      await dropDatabase(admin, db);
       await admin.end();
     }
   });
@@ -149,7 +149,7 @@ describe('міграції', () => {
       await expect(migrateToLatest(asApp)).rejects.toThrow();
     } finally {
       await asApp.destroy();
-      await admin.query(`DROP DATABASE ${db} WITH (FORCE)`);
+      await dropDatabase(admin, db);
       await admin.end();
     }
   });
@@ -163,3 +163,17 @@ describe('міграції', () => {
     }
   });
 });
+
+/**
+ * Видаляє тимчасову базу, коли її з'єднання справді закрились. Kysely destroy() лише починає закривати
+ * пул; DROP … WITH (FORCE) у цей момент обриває з'єднання, що ще закривається, і pg кидає необроблену
+ * помилку 57P01 (траплялось у CI). FORCE лишається на випадок, якщо з'єднання не закрились за 5 с.
+ */
+async function dropDatabase(admin: pg.Client, db: string): Promise<void> {
+  for (let i = 0; i < 50; i++) {
+    const { rows } = await admin.query<{ n: number }>('select count(*)::int as n from pg_stat_activity where datname = $1', [db]);
+    if (rows[0]!.n === 0) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  await admin.query(`DROP DATABASE ${db} WITH (FORCE)`);
+}
