@@ -1,5 +1,9 @@
 // Помічники тестів: власні ключі для підписаних токенів, застосунок, доступ до outbox і журналу.
+import { readdirSync, readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
 import { Writable } from 'node:stream';
+import { Ajv2020 } from 'ajv/dist/2020.js';
 import { SignJWT, createLocalJWKSet, exportJWK, generateKeyPair } from 'jose';
 import { inject } from 'vitest';
 import { buildApp, LOG_REDACT } from '../src/app.js';
@@ -94,9 +98,13 @@ export async function testApp() {
   }
 
   async function close() {
-    await app.close();
-    await db.destroy();
-    await relay.destroy();
+    try {
+      await checkOutgoingEvents(relay);
+    } finally {
+      await app.close();
+      await db.destroy();
+      await relay.destroy();
+    }
   }
 
   return { app, db, tokens, logs, as, events, close };
@@ -115,4 +123,25 @@ export async function seedSchool(ctx: TestCtx, schoolId: string) {
     { class_id: cls.class_id, subject_id: subj.subject_id, teacher_id: teacher.teacher_id, hours_per_week: 4 },
   ]);
   return { cls, subj, teacher };
+}
+
+/**
+ * Кожна school.data.changed, яку сервіс поклав в outbox (source = school-service), відповідає схемі
+ * contracts. Викликається при закритті тестового застосунку, тож перевіряє все, що записав файл тестів.
+ * Рядки, вставлені тестами напряму (без source), не перевіряються.
+ */
+async function checkOutgoingEvents(relay: Db): Promise<void> {
+  const require = createRequire(import.meta.url);
+  const dir = join(dirname(require.resolve('@lad/contracts/package.json')), 'schemas', 'events');
+  const ajv = new Ajv2020({ strict: false, validateFormats: false, allErrors: true });
+  for (const f of readdirSync(dir).filter((x) => x.endsWith('.json'))) ajv.addSchema(JSON.parse(readFileSync(join(dir, f), 'utf8')));
+  const validate = ajv.getSchema('https://lad.example/contracts/schemas/events/school.data.changed.v1.json')!;
+  const rows = await relay.selectFrom('outbox').select(['payload']).where('topic', '=', 'school.data.changed').execute();
+  const failures: string[] = [];
+  for (const r of rows) {
+    const event = (typeof r.payload === 'string' ? JSON.parse(r.payload) : r.payload) as Envelope;
+    if (event.source !== 'school-service') continue;
+    if (!validate(event)) failures.push(`${JSON.stringify(event.data).slice(0, 200)}: ${JSON.stringify(validate.errors?.slice(0, 2))}`);
+  }
+  if (failures.length > 0) throw new Error(`school.data.changed не за схемою contracts (${failures.length}):\n${failures.slice(0, 5).join('\n')}`);
 }
